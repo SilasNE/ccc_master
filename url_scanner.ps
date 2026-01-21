@@ -15,7 +15,7 @@ Write-Host ("=" * 20)
 function Test-SQLInction {
   param($targetUrl)
     
-  Write-Host "`n[*] Teste SQL Injection..." -ForegroundColor Yellow
+  Write-Host "n[*] Teste SQL Injection..." -ForegroundColor Yellow
     
   $sqlPayloads = @(
       "' OR '1'='1",
