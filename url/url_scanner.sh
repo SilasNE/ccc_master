@@ -1,268 +1,338 @@
 #!/bin/bash
 
+# Globale Variablen für Empfehlungen
+$global:sqlVulnFound = $false
+$global:xssVulnFound = $false
+$global:directoriesFound = $false
+$global:loginFound = $false
+$global:missingHeaders = $false
+$global:sslIssue = $false
 
-# Farben für Output
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-CYAN='\033[0;36m'
-GRAY='\033[0;37m'
-NC='\033[0m' # No Color
+# Schwachstellen-Scanner
+# WICHTIG: Nur auf eigenen Systemen oder mit ausdrücklicher Erlaubnis nutzen!
 
-# URL vom Benutzer abfragen
-echo -e "${CYAN}=== Schwachstellen-Scanner ===${NC}"
-read -p "Gib die zu testende URL ein (z.B. http://example.com): " url
+$url = Read-Host "Gib die zu testende URL ein (z.B. http://example.com)"
+Write-Host "`n=== Schwachstellen-Scanner gestartet ===" -ForegroundColor Cyan
 
-# Trailing slash entfernen
-base_url="${url%/}"
+# Basis-URL bereinigen
+$baseUrl = $url -replace "/$", ""
 
 # ==================== SQL Injection Tests ====================
-test_sql_injection() {
-    echo -e "\n${YELLOW}[*] Teste SQL Injection...${NC}"
+function Test-SQLInjection {
+    param($targetUrl)
     
-    sql_payloads=(
-        "' OR '1'='1"
-        "' OR 1=1--"
-        "admin'--"
-        "' UNION SELECT NULL--"
+    Write-Host "`n[*] Teste SQL Injection..." -ForegroundColor Yellow
+    
+    $sqlPayloads = @(
+        "' OR '1'='1",
+        "' OR 1=1--",
+        "admin'--",
+        "' UNION SELECT NULL--",
         "1' AND '1'='1"
     )
     
-    for payload in "${sql_payloads[@]}"; do
-        # URL-Encoding für den Payload
-        encoded=$(echo "$payload" | jq -sRr @uri 2>/dev/null || python3 -c "import urllib.parse; print(urllib.parse.quote('$payload'))" 2>/dev/null)
-        
-        test_url="${base_url}/?id=${encoded}"
-        
-        # Request mit curl
-        response=$(curl -s -L "$test_url" 2>/dev/null)
-        
-        # Suche nach SQL-Fehler-Keywords
-        if echo "$response" | grep -iqE "SQL|syntax|mysql|database|warning|error in your SQL"; then
-            echo -e "${RED}[!] WARNUNG: Mögliche SQL Injection gefunden mit Payload: $payload${NC}"
-        fi
-    done
-    
-    echo -e "${GREEN}[✓] SQL Injection Test abgeschlossen${NC}"
+    foreach ($payload in $sqlPayloads) {
+        try {
+            $testUrl = "$targetUrl/?id=$payload"
+            $response = Invoke-WebRequest -Uri $testUrl -TimeoutSec 5 -ErrorAction SilentlyContinue
+            
+            # Suche nach SQL-Fehler-Keywords
+            if ($response.Content -match "SQL|syntax|mysql|database|warning") {
+                Write-Host "[!] WARNUNG: Mögliche SQL Injection gefunden mit Payload: $payload" -ForegroundColor Red
+                $global:sqlVulnFound = $true
+            }
+        } catch {
+            # Stiller Fehler
+        }
+    }
+    Write-Host "[✓] SQL Injection Test abgeschlossen" -ForegroundColor Green
 }
 
 # ==================== XSS Tests ====================
-test_xss() {
-    echo -e "\n${YELLOW}[*] Teste Cross-Site Scripting (XSS)...${NC}"
+function Test-XSS {
+    param($targetUrl)
     
-    xss_payloads=(
-        "<script>alert('XSS')</script>"
-        "<img src=x onerror=alert('XSS')>"
-        "<svg/onload=alert('XSS')>"
+    Write-Host "`n[*] Teste Cross-Site Scripting (XSS)..." -ForegroundColor Yellow
+    
+    $xssPayloads = @(
+        "<script>alert('XSS')</script>",
+        "<img src=x onerror=alert('XSS')>",
+        "<svg/onload=alert('XSS')>",
         "javascript:alert('XSS')"
     )
     
-    for payload in "${xss_payloads[@]}"; do
-        # URL-Encoding
-        encoded=$(python3 -c "import urllib.parse; print(urllib.parse.quote('$payload'))" 2>/dev/null)
-        
-        test_url="${base_url}/?search=${encoded}"
-        response=$(curl -s -L "$test_url" 2>/dev/null)
-        
-        # Prüfe ob Payload im Response reflektiert wird
-        if echo "$response" | grep -qF "$payload"; then
-            echo -e "${RED}[!] WARNUNG: Mögliches XSS gefunden - Payload wird reflektiert${NC}"
-        fi
-    done
-    
-    echo -e "${GREEN}[✓] XSS Test abgeschlossen${NC}"
+    foreach ($payload in $xssPayloads) {
+        try {
+            $encodedPayload = [System.Web.HttpUtility]::UrlEncode($payload)
+            $testUrl = "$targetUrl/?search=$encodedPayload"
+            $response = Invoke-WebRequest -Uri $testUrl -TimeoutSec 5 -ErrorAction SilentlyContinue
+            
+            # Prüfe ob Payload im Response reflektiert wird
+            if ($response.Content -match [regex]::Escape($payload)) {
+                Write-Host "[!] WARNUNG: Mögliches XSS gefunden - Payload wird reflektiert" -ForegroundColor Red
+                $global:xssVulnFound = $true
+            }
+        } catch {
+            # Stiller Fehler
+        }
+    }
+    Write-Host "[✓] XSS Test abgeschlossen" -ForegroundColor Green
 }
 
 # ==================== Directory Enumeration ====================
-test_directories() {
-    echo -e "\n${YELLOW}[*] Suche versteckte Verzeichnisse...${NC}"
+function Test-Directories {
+    param($targetUrl)
     
-    directories=(
-        "admin"
-        "login"
-        "dashboard"
-        "backup"
-        "config"
-        "api"
-        "uploads"
-        "wp-admin"
-        "phpmyadmin"
-        "test"
-        "dev"
-        ".git"
+    Write-Host "`n[*] Suche versteckte Verzeichnisse..." -ForegroundColor Yellow
+    
+    $directories = @(
+        "admin",
+        "login",
+        "dashboard",
+        "backup",
+        "config",
+        "api",
+        "uploads",
+        "wp-admin",
+        "phpmyadmin",
+        "test",
+        "dev",
+        ".git",
         ".env"
-        "robots.txt"
-        "sitemap.xml"
     )
     
-    found_count=0
+    $found = @()
     
-    for dir in "${directories[@]}"; do
-        test_url="${base_url}/${dir}"
-        
-        # HTTP Status Code abrufen
-        status=$(curl -s -o /dev/null -w "%{http_code}" "$test_url" 2>/dev/null)
-        
-        if [ "$status" -eq 200 ]; then
-            echo -e "${GREEN}[+] Gefunden: $test_url (Status: $status)${NC}"
-            ((found_count++))
-        elif [ "$status" -eq 403 ]; then
-            echo -e "${YELLOW}[!] Zugriff verweigert (403): $test_url${NC}"
-        fi
-    done
+    foreach ($dir in $directories) {
+        try {
+            $testUrl = "$targetUrl/$dir"
+            $response = Invoke-WebRequest -Uri $testUrl -TimeoutSec 3 -ErrorAction Stop
+            
+            if ($response.StatusCode -eq 200) {
+                Write-Host "[+] Gefunden: $testUrl (Status: $($response.StatusCode))" -ForegroundColor Green
+                $found += $testUrl
+                $global:directoriesFound = $true
+            }
+        } catch {
+            if ($_.Exception.Response.StatusCode.Value__ -eq 403) {
+                Write-Host "[!] Zugriff verweigert (403): $testUrl" -ForegroundColor Yellow
+            }
+        }
+    }
     
-    if [ $found_count -eq 0 ]; then
-        echo -e "${GRAY}[-] Keine interessanten Verzeichnisse gefunden${NC}"
-    fi
+    if ($found.Count -eq 0) {
+        Write-Host "[-] Keine interessanten Verzeichnisse gefunden" -ForegroundColor Gray
+    }
 }
 
-# ==================== Login Brute-Force Check ====================
-test_login_bruteforce() {
-    echo -e "\n${YELLOW}[*] Teste häufige Login-Kombinationen...${NC}"
-    echo -e "${GRAY}[i] Hinweis: Dies ist nur ein einfacher Test mit wenigen Versuchen${NC}"
+# ==================== Brute Force Login (Basis) ====================
+function Test-LoginBruteForce {
+    param($targetUrl)
     
-    login_pages=(
-        "/login"
-        "/admin"
-        "/signin"
-        "/auth"
-        "/wp-login.php"
+    Write-Host "`n[*] Teste häufige Login-Kombinationen..." -ForegroundColor Yellow
+    Write-Host "[i] Hinweis: Dies ist nur ein einfacher Test mit wenigen Versuchen" -ForegroundColor Gray
+    
+    $credentials = @(
+        @{user="admin"; pass="admin"},
+        @{user="admin"; pass="password"},
+        @{user="admin"; pass="123456"},
+        @{user="root"; pass="root"},
+        @{user="test"; pass="test"}
     )
     
-    for page in "${login_pages[@]}"; do
-        test_url="${base_url}${page}"
-        status=$(curl -s -o /dev/null -w "%{http_code}" "$test_url" 2>/dev/null)
-        
-        if [ "$status" -eq 200 ]; then
-            echo -e "${GREEN}[+] Login-Seite gefunden: $test_url${NC}"
-            echo -e "${RED}[!] WARNUNG: Login-Seite könnte anfällig für Brute-Force sein${NC}"
-        fi
-    done
+    # Versuche /login zu finden
+    $loginPages = @("/login", "/admin", "/signin", "/auth")
     
-    echo -e "${GREEN}[✓] Login-Test abgeschlossen${NC}"
+    foreach ($page in $loginPages) {
+        try {
+            $testUrl = "$targetUrl$page"
+            $response = Invoke-WebRequest -Uri $testUrl -TimeoutSec 3 -ErrorAction SilentlyContinue
+            
+            if ($response.StatusCode -eq 200) {
+                Write-Host "[+] Login-Seite gefunden: $testUrl" -ForegroundColor Green
+                
+                # Warnung ausgeben
+                Write-Host "[!] WARNUNG: Login-Seite ohne Rate-Limiting könnte anfällig für Brute-Force sein" -ForegroundColor Red
+                $global:loginFound = $true
+            }
+        } catch {
+            # Keine Login-Seite gefunden
+        }
+    }
+    
+    Write-Host "[✓] Login-Test abgeschlossen" -ForegroundColor Green
 }
 
 # ==================== Security Headers Check ====================
-test_security_headers() {
-    echo -e "\n${YELLOW}[*] Prüfe Security Headers...${NC}"
+function Test-SecurityHeaders {
+    param($targetUrl)
     
-    # Headers mit curl abrufen
-    headers=$(curl -sI "$base_url" 2>/dev/null)
+    Write-Host "`n[*] Prüfe Security Headers..." -ForegroundColor Yellow
     
-    # Array von Security Headers
-    declare -A sec_headers=(
-        ["X-Frame-Options"]="Schutz vor Clickjacking"
-        ["X-Content-Type-Options"]="MIME-Type Sniffing Schutz"
-        ["Strict-Transport-Security"]="HTTPS Erzwingung"
-        ["Content-Security-Policy"]="XSS Schutz"
-        ["X-XSS-Protection"]="Browser XSS Filter"
-    )
-    
-    for header in "${!sec_headers[@]}"; do
-        if echo "$headers" | grep -qi "^$header:"; then
-            echo -e "${GREEN}[✓] $header gesetzt${NC}"
-        else
-            echo -e "${RED}[!] $header fehlt - ${sec_headers[$header]}${NC}"
-        fi
-    done
+    try {
+        $response = Invoke-WebRequest -Uri $targetUrl -TimeoutSec 5
+        
+        $securityHeaders = @{
+            "X-Frame-Options" = "Schutz vor Clickjacking"
+            "X-Content-Type-Options" = "MIME-Type Sniffing Schutz"
+            "Strict-Transport-Security" = "HTTPS Erzwingung"
+            "Content-Security-Policy" = "XSS Schutz"
+            "X-XSS-Protection" = "Browser XSS Filter"
+        }
+        
+        foreach ($header in $securityHeaders.Keys) {
+            if ($response.Headers[$header]) {
+                Write-Host "[✓] $header gesetzt" -ForegroundColor Green
+            } else {
+                Write-Host "[!] $header fehlt - $($securityHeaders[$header])" -ForegroundColor Red
+                $global:missingHeaders = $true
+            }
+        }
+    } catch {
+        Write-Host "[!] Fehler beim Abrufen der Headers" -ForegroundColor Red
+    }
 }
 
-# ==================== Robots.txt Check ====================
-test_robots() {
-    echo -e "\n${YELLOW}[*] Prüfe robots.txt...${NC}"
+# ==================== Empfehlungssystem ====================
+function Generate-Recommendations {
+    param($targetUrl)
     
-    robots_url="${base_url}/robots.txt"
-    status=$(curl -s -o /dev/null -w "%{http_code}" "$robots_url" 2>/dev/null)
+    Write-Host "`n=== ANALYSE ABGESCHLOSSEN ===" -ForegroundColor Cyan
+    Write-Host "`n=== EMPFOHLENE NÄCHSTE SCHRITTE ===`n" -ForegroundColor Cyan
     
-    if [ "$status" -eq 200 ]; then
-        echo -e "${GREEN}[+] robots.txt gefunden${NC}"
-        content=$(curl -s "$robots_url" 2>/dev/null)
-        
-        # Zeige interessante Disallow-Einträge
-        echo -e "${CYAN}Interessante Einträge:${NC}"
-        echo "$content" | grep -i "Disallow:" | head -10
-    else
-        echo -e "${GRAY}[-] Keine robots.txt gefunden${NC}"
-    fi
-}
-
-# ==================== SSL/TLS Check ====================
-test_ssl() {
-    echo -e "\n${YELLOW}[*] Prüfe SSL/TLS...${NC}"
+    $recommendations = @()
     
-    # Prüfe ob HTTPS verwendet wird
-    if [[ $base_url == https://* ]]; then
-        echo -e "${GREEN}[✓] Website nutzt HTTPS${NC}"
-        
-        # SSL-Details mit openssl abrufen (wenn verfügbar)
-        if command -v openssl &> /dev/null; then
-            domain=$(echo "$base_url" | sed -e 's|^https\?://||' -e 's|/.*$||')
-            ssl_info=$(echo | openssl s_client -connect "${domain}:443" -servername "$domain" 2>/dev/null | openssl x509 -noout -dates 2>/dev/null)
-            
-            if [ -n "$ssl_info" ]; then
-                echo -e "${CYAN}Zertifikat-Info:${NC}"
-                echo "$ssl_info"
-            fi
-        fi
-    else
-        echo -e "${RED}[!] WARNUNG: Website nutzt kein HTTPS!${NC}"
-    fi
+    # SQL Injection Empfehlung
+    if ($global:sqlVulnFound) {
+        Write-Host "[!] SQL Injection Schwachstellen gefunden!" -ForegroundColor Red
+        Write-Host "Empfohlene Tools:" -ForegroundColor Yellow
+        Write-Host "   1. SQLMap - Automatisierte SQL Injection Exploitation"
+        Write-Host "      Befehl: sqlmap -u `"${targetUrl}/?id=1`" --batch --banner"
+        Write-Host ""
+        $recommendations += "sqlmap"
+    }
+    
+    # XSS Empfehlung
+    if ($global:xssVulnFound) {
+        Write-Host "[!] XSS Schwachstellen gefunden!" -ForegroundColor Red
+        Write-Host "Empfohlene Tools:" -ForegroundColor Yellow
+        Write-Host "   1. XSStrike - Advanced XSS Detection"
+        Write-Host "      Befehl: python xsstrike.py -u `"${targetUrl}/?search=test`""
+        Write-Host "   2. Burp Suite - Manuelle XSS-Tests im Intruder"
+        Write-Host ""
+        $recommendations += "xsstrike"
+    }
+    
+    # Directory Enumeration Empfehlung
+    if ($global:directoriesFound) {
+        Write-Host "[+] Interessante Verzeichnisse gefunden!" -ForegroundColor Green
+        Write-Host "Empfohlene Tools für tiefere Analyse:" -ForegroundColor Yellow
+        Write-Host "   1. Gobuster - Schnelles Directory Bruteforcing"
+        Write-Host "      Befehl: gobuster dir -u $targetUrl -w C:\wordlists\common.txt"
+        Write-Host "   2. Dirb - Rekursives Directory Scanning"
+        Write-Host "      Befehl: dirb $targetUrl"
+        Write-Host "   3. Feroxbuster - Moderner, schneller Scanner"
+        Write-Host "      Befehl: feroxbuster -u $targetUrl"
+        Write-Host ""
+        $recommendations += "gobuster"
+    }
+    
+    # Login-Seiten Empfehlung
+    if ($global:loginFound) {
+        Write-Host "[!] Login-Seiten gefunden!" -ForegroundColor Yellow
+        Write-Host "Empfohlene Tools:" -ForegroundColor Yellow
+        Write-Host "   1. Hydra - Brute-Force Login (Linux/WSL)"
+        Write-Host "      Befehl: hydra -L users.txt -P passwords.txt $($targetUrl -replace 'https?://','') http-post-form '/login:username=^USER^&password=^PASS^:F=incorrect'"
+        Write-Host "   2. Burp Suite Intruder - Kontrollierte Brute-Force Angriffe"
+        Write-Host "   3. Medusa - Alternative zu Hydra"
+        Write-Host ""
+        $recommendations += "hydra"
+    }
+    
+    # Security Headers Empfehlung
+    if ($global:missingHeaders) {
+        Write-Host "[!] Wichtige Security Headers fehlen!" -ForegroundColor Red
+        Write-Host "Empfohlene Analyse:" -ForegroundColor Yellow
+        Write-Host "   1. SecurityHeaders.com - Online Header-Analyse"
+        Write-Host "      URL: https://securityheaders.com/?q=$targetUrl"
+        Write-Host "   2. Mozilla Observatory"
+        Write-Host "      URL: https://observatory.mozilla.org/"
+        Write-Host ""
+    }
+    
+    # SSL/TLS Empfehlung
+    if ($global:sslIssue) {
+        Write-Host "[!] SSL/TLS Probleme erkannt!" -ForegroundColor Red
+        Write-Host "Empfohlene Tools:" -ForegroundColor Yellow
+        Write-Host "   1. SSLScan - SSL/TLS Konfiguration testen (Linux/WSL)"
+        Write-Host "      Befehl: sslscan $($targetUrl -replace 'https?://','')"
+        Write-Host "   2. TestSSL.sh - Umfassende SSL/TLS Tests"
+        Write-Host "      Befehl: testssl.sh $targetUrl"
+        Write-Host "   3. SSL Labs - Online SSL Test"
+        Write-Host "      URL: https://www.ssllabs.com/ssltest/"
+        Write-Host ""
+        $recommendations += "sslscan"
+    }
+    
+    # Allgemeine Empfehlungen
+    Write-Host "=== ALLGEMEINE EMPFEHLUNGEN ===" -ForegroundColor Cyan
+    Write-Host ""
+    Write-Host "Für umfassende Web-Anwendungs-Tests:" -ForegroundColor Yellow
+    Write-Host "   1. OWASP ZAP - Vollständiger Vulnerability Scanner"
+    Write-Host "      Download: https://www.zaproxy.org/download/"
+    Write-Host ""
+    Write-Host "   2. Nikto - Web-Server Scanner (Perl)"
+    Write-Host "      Befehl: nikto -h $targetUrl"
+    Write-Host ""
+    Write-Host "   3. Nmap - Port-Scanning und Service-Erkennung"
+    Write-Host "      Befehl: nmap -sV -sC $($targetUrl -replace 'https?://','')"
+    Write-Host ""
+    Write-Host "   4. Burp Suite - Professional Web Security Testing"
+    Write-Host "      Download: https://portswigger.net/burp"
+    Write-Host ""
+    
+    # Zusammenfassung
+    Write-Host "=== ZUSAMMENFASSUNG ===" -ForegroundColor Cyan
+    if ($recommendations.Count -eq 0) {
+        Write-Host "[✓] Keine kritischen Schwachstellen im Basis-Scan gefunden" -ForegroundColor Green
+        Write-Host "[!] Empfehlung: Führe dennoch tiefere Tests mit OWASP ZAP oder Burp Suite durch" -ForegroundColor Yellow
+    } else {
+        Write-Host "[!] $($recommendations.Count) Schwachstellen-Kategorien benötigen weitere Untersuchung" -ForegroundColor Red
+        Write-Host "Priorität: Starte mit den oben genannten Tools in der angegebenen Reihenfolge" -ForegroundColor Yellow
+    }
+    
+    Write-Host ""
+    Write-Host "⚠️  WICHTIGER HINWEIS:" -ForegroundColor Yellow
+    Write-Host "Diese Tests nur auf eigenen Systemen oder mit ausdrücklicher Erlaubnis durchführen!"
+    Write-Host "Unautorisierte Penetrationstests sind illegal!"
 }
 
 # ==================== Haupt-Menü ====================
-echo -e "\n${CYAN}Wähle die Tests aus:${NC}"
-echo "1 - SQL Injection"
-echo "2 - Cross-Site Scripting (XSS)"
-echo "3 - Directory Enumeration"
-echo "4 - Login Brute-Force Check"
-echo "5 - Security Headers"
-echo "6 - Robots.txt Check"
-echo "7 - SSL/TLS Check"
-echo "8 - Alle Tests ausführen"
+Write-Host "`nWähle die Tests aus:"
+Write-Host "1 - SQL Injection"
+Write-Host "2 - Cross-Site Scripting (XSS)"
+Write-Host "3 - Directory Enumeration"
+Write-Host "4 - Login Brute-Force Check"
+Write-Host "5 - Security Headers"
+Write-Host "6 - Alle Tests ausführen"
 
-read -p $'\nDeine Wahl (1-8): ' choice
+$choice = Read-Host "`nDeine Wahl (1-6)"
 
-case $choice in
-    1)
-        test_sql_injection
-        ;;
-    2)
-        test_xss
-        ;;
-    3)
-        test_directories
-        ;;
-    4)
-        test_login_bruteforce
-        ;;
-    5)
-        test_security_headers
-        ;;
-    6)
-        test_robots
-        ;;
-    7)
-        test_ssl
-        ;;
-    8)
-        test_sql_injection
-        test_xss
-        test_directories
-        test_login_bruteforce
-        test_security_headers
-        test_robots
-        test_ssl
-        ;;
-    *)
-        echo -e "${RED}Ungültige Auswahl!${NC}"
-        exit 1
-        ;;
-esac
+switch ($choice) {
+    "1" { Test-SQLInjection -targetUrl $baseUrl }
+    "2" { Test-XSS -targetUrl $baseUrl }
+    "3" { Test-Directories -targetUrl $baseUrl }
+    "4" { Test-LoginBruteForce -targetUrl $baseUrl }
+    "5" { Test-SecurityHeaders -targetUrl $baseUrl }
+    "6" {
+        Test-SQLInjection -targetUrl $baseUrl
+        Test-XSS -targetUrl $baseUrl
+        Test-Directories -targetUrl $baseUrl
+        Test-LoginBruteForce -targetUrl $baseUrl
+        Test-SecurityHeaders -targetUrl $baseUrl
+    }
+    default { Write-Host "Ungültige Auswahl!" -ForegroundColor Red }
+}
 
-echo -e "\n${CYAN}=== Scan abgeschlossen ===${NC}"
-echo -e "\n${YELLOW}WICHTIG: Dies ist nur ein Basis-Scanner. Für professionelle Tests nutze:${NC}"
-echo "- OWASP ZAP, Burp Suite (Web-Schwachstellen)"
-echo "- SQLMap (SQL Injection)"
-echo "- Gobuster, Dirb (Directory Brute-Force)"
-echo "- Nmap (Port-Scanning)"
-echo "- Nikto (Web-Server-Scanner)"
+# Empfehlungen generieren
+Generate-Recommendations -targetUrl $baseUrl
