@@ -1,0 +1,10 @@
+#! /usr/bin/bash
+
+$action = Read-Host "Schreibe mir die zu analysierende URL: "
+$fortfahren = Read-Host "Soll ich schwachstellen erkennen? (j/n) "
+
+if ($fortfahren -eq "j") {
+  curl "$action"
+}
+
+  
