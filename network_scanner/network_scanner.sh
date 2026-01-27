@@ -4,18 +4,23 @@ echo "==============="
 echo "Network Scanner"
 echo "==============="
 
-nmap -sn
+# Netzwerk-Bereich eingeben
+read -p "Gib das Netzwerk ein (z.B. 192.168.1.0/24): " network
+echo "$network wird nach aktiven Hosts gescannt..."
+nmap -sn $network
 
-$network = Read-Host "Welche IP möchtest du davon genauer scannen? "
-echo "$network wird jetzt gescannt..."
-nmap $network
+# IP für detaillierten Scan eingeben
+read -p "Welche IP möchtest du davon genauer scannen? " target_ip
+echo "$target_ip wird jetzt gescannt..."
+nmap $target_ip
 
-$detailed = Read-Host "Möchtest du noch ein genaueren Port scannen? (J/N) "
-if $detailed == J or j:
-    $port = Read-Host "Welchen Port möchtest du scannen? "
+# Port-Scan optional
+read -p "Möchtest du noch einen genaueren Port scannen? (J/N) " detailed
+if [[ "$detailed" == "J" ]] || [[ "$detailed" == "j" ]]; then
+    read -p "Welchen Port möchtest du scannen? " port
     echo "Port $port wird jetzt gescannt..."
-    nmap -p $port $network
+    nmap -p $port $target_ip
     echo "Port $port wurde gescannt!"
-else:
-    echo "Geht leider nicht."
-
+else
+    echo "Scan abgeschlossen."
+fi
