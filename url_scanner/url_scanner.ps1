@@ -1,0 +1,151 @@
+#! /usr/bin/bash
+
+$action = Read-Host "Schreibe mir die zu analysierende URL: "
+$fortfahren = Read-Host "Soll ich schwachstellen erkennen? (j/n) "
+
+
+if ($fortfahren -eq "j") {
+  curl "$action" -v
+}
+Write-Host ("=" * 20)
+Write-Host "Master fängt an zu arbeiten"
+Write-Host ("=" * 20)
+
+
+function Test-SQLInction {
+  param($targetUrl)
+    
+  Write-Host "n[*] Teste SQL Injection..." -ForegroundColor Yellow
+    
+  $sqlPayloads = @(
+      "' OR '1'='1",
+      "' OR 1=1--",
+      "admin'--",
+      "' UNION SELECT NULL--",
+      "1' AND '1'='1"
+    )
+    
+  foreach ($payload in $sqlPayloads) {
+      try {
+          $testUrl = "$targetUrl/?id=$payload"
+          $response = Invoke-WebRequest -Uri $testUrl -TimeoutSec 5 -ErrorAction SilentlyContinue
+            
+          # Suche nach SQL-Fehler-Keywords
+          if ($response.Content -match "SQL|syntax|mysql|database|warning") {
+              Write-Host "[!] WARNUNG: Mögliche SQL Injection gefunden mit Payload: $payload" -ForegroundColor Red
+            }
+        } catch {
+            # Stiller Fehler
+        }
+    }
+  Write-Host "[✓] SQL Injection Test abgeschlossen" -ForegroundColor Green
+}
+
+function Test-LoginBruteForce {
+    param($targetUrl)
+    
+    Write-Host "`n[*] Teste häufige Login-Kombinationen..." -ForegroundColor Yellow
+    Write-Host "[i] Hinweis: Dies ist nur ein einfacher Test mit wenigen Versuchen" -ForegroundColor Gray
+    
+    $credentials = @(
+        @{user="admin"; pass="admin"},
+        @{user="admin"; pass="password"},
+        @{user="admin"; pass="123456"},
+        @{user="root"; pass="root"},
+        @{user="test"; pass="test"}
+    )
+    
+    # Versuche /login zu finden
+    $loginPages = @("/login", "/admin", "/signin", "/auth")
+    
+    foreach ($page in $loginPages) {
+        try {
+            $testUrl = "$targetUrl$page"
+            $response = Invoke-WebRequest -Uri $testUrl -TimeoutSec 3 -ErrorAction SilentlyContinue
+            
+            if ($response.StatusCode -eq 200) {
+                Write-Host "[+] Login-Seite gefunden: $testUrl" -ForegroundColor Green
+                
+                # Warnung ausgeben
+                Write-Host "[!] WARNUNG: Login-Seite ohne Rate-Limiting könnte anfällig für Brute-Force sein" -ForegroundColor Red
+            }
+        } catch {
+            # Keine Login-Seite gefunden
+        }
+    }
+    
+    Write-Host "[✓] Login-Test abgeschlossen" -ForegroundColor Green
+}  
+function Test-XSS {
+    param($targetUrl)
+    
+    Write-Host "`n[*] Teste Cross-Site Scripting (XSS)..." -ForegroundColor Yellow
+    
+    $xssPayloads = @(
+        "<script>alert('XSS')</script>",
+        "<img src=x onerror=alert('XSS')>",
+        "<svg/onload=alert('XSS')>",
+        "javascript:alert('XSS')"
+    )
+    
+    foreach ($payload in $xssPayloads) {
+        try {
+            $encodedPayload = [System.Web.HttpUtility]::UrlEncode($payload)
+            $testUrl = "$targetUrl/?search=$encodedPayload"
+            $response = Invoke-WebRequest -Uri $testUrl -TimeoutSec 5 -ErrorAction SilentlyContinue
+            
+            # Prüfe ob Payload im Response reflektiert wird
+            if ($response.Content -match [regex]::Escape($payload)) {
+                Write-Host "[!] WARNUNG: Mögliches XSS gefunden - Payload wird reflektiert" -ForegroundColor Red
+            }
+        } catch {
+            # Stiller Fehler
+        }
+    }
+    Write-Host "[✓] XSS Test abgeschlossen" -ForegroundColor Green
+}
+function Test-Directories {
+    param($targetUrl)
+    
+    Write-Host "`n[*] Suche versteckte Verzeichnisse..." -ForegroundColor Yellow
+    
+    $directories = @(
+        "admin",
+        "login",
+        "dashboard",
+        "backup",
+        "config",
+        "api",
+        "uploads",
+        "wp-admin",
+        "phpmyadmin",
+        "test",
+        "dev",
+        ".git",
+        ".env"
+    )
+    
+    $found = @()
+    
+    foreach ($dir in $directories) {
+        try {
+            $testUrl = "$targetUrl/$dir"
+            $response = Invoke-WebRequest -Uri $testUrl -TimeoutSec 3 -ErrorAction Stop
+            
+            if ($response.StatusCode -eq 200) {
+                Write-Host "[+] Gefunden: $testUrl (Status: $($response.StatusCode))" -ForegroundColor Green
+                $found += $testUrl
+            }
+        } catch {
+            if ($_.Exception.Response.StatusCode.Value__ -eq 403) {
+                Write-Host "[!] Zugriff verweigert (403): $testUrl" -ForegroundColor Yellow
+            }
+        }
+    }
+    
+    if ($found.Count -eq 0) {
+        Write-Host "[-] Keine interessanten Verzeichnisse gefunden" -ForegroundColor Gray
+    }
+}
+
+  
